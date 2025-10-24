@@ -1,14 +1,20 @@
 # python3 main.py
 
+# bias's to be aware of: 
+# due to limited minute data the backtest uses data at the close of the day, in real time I will only be able to use data at 3:58pm, two minute discrepancy
+# if a stock hits the take profit and then the stop loss within one hour then it will assume the stop loss was triggered (slight bias against the strategy)
+
 # decide whether dividing by close price or velocity when calculating acceleration
 # check which is better in the backtest (leaning torwards dividing by velocity)
 
 import yfinance as yf
 import pandas as pd
+import csv
 from datetime import date, timedelta
+import pytz
 from config import *
 
-positions = []
+positions = {}
 
 def main():
     import time
@@ -16,15 +22,17 @@ def main():
 
     symbols = get_symbols()
     data = get_data(symbols)
-    print("data: ")
-    print(sorted(set(data.index.date)))
+    # print("data: ")
+    # print(sorted(set(data.index.date)))
 
-    # print(get_top_gainers(data, '2025-10-17'))
-    # print(calculate_vel_acc('NVTS', data, '2025-10-17'))
-    buy('NVTS', data, '2025-10-17')
-    print("positions: ", positions)
+    # buy('NVTS', data, '2025-10-17')
+    # print("positions: ", positions)
 
-    # loop_through_days(data)
+    # check_sell('NVTS', data, '2025-10-20')
+
+    loop_through_days(data)
+
+    print("Program Completed.")
 
     end_time = time.time()
     elapsed = end_time - start_time
@@ -33,22 +41,6 @@ def main():
     # # Example usage:
     # current_price = get_price('AAPL', '2025-10-15')
     # print(current_price)
-
-# it was correct for AAPL 2025-10-15
-def get_price(symbol, input_date):
-    # Get the price of the stock at 3:59pm on the given date.
-
-    # Download 1-minute interval data for the given date
-    start_date = date.fromisoformat(input_date)
-    end_date = start_date + timedelta(days=1)
-    data = yf.download(symbol, start=start_date, end=end_date, interval='1m', progress=False, auto_adjust=False)
-    if data.empty:
-        return None
-
-    # specific fields
-    close_2nd_last = data['Close'][symbol].iloc[-2]
-
-    return float(close_2nd_last) # get the price at the time of 3:58pm
 
 def get_symbols():
     # Reads symbols from yahoo_screener_symbols.csv and returns them as a list of strings.
@@ -150,7 +142,7 @@ def calculate_vel_acc(symbol, data, input_date):
     prev_close = close.shift(acceleration_lookback)
     prev_close_vel_lookback = close.shift(acceleration_lookback + velocity_lookback)
     prev_velocity = 100 * (prev_close - prev_close_vel_lookback) / prev_close
-    acceleration = 100 * (velocity - prev_velocity) / close
+    acceleration = (velocity - prev_velocity) / velocity
     # Calculate SMA for velocity and acceleration
     velocity_sma_series = velocity.rolling(window=velocity_sma).mean()
     acceleration_sma_series = acceleration.rolling(window=acceleration_sma).mean()
@@ -169,38 +161,104 @@ def calculate_vel_acc(symbol, data, input_date):
 
 def check_buy(symbol, data, input_date):
     velocity, acceleration = calculate_vel_acc(symbol, data, input_date)
-    if velocity_threshold_min < velocity and velocity < velocity_threshold_max and acceleration > acceleration_lookback:
-        buy(symbol, data, input_date)
+    if velocity_threshold_min < velocity and velocity < velocity_threshold_max and acceleration > acceleration_threshold:
+        buy(symbol, data, input_date, velocity, acceleration)
 
-def buy(symbol, data, input_date):
+def buy(symbol, data, input_date, velocity, acceleration):
     buy_price = data[symbol]['Close'].loc[pd.to_datetime(data.index).date == pd.to_datetime(input_date).date()].iloc[-1]
+    
+    positions[symbol] = {
+        'buy_date': input_date, 
+        'buy_price': float(buy_price), 
+        'velocity': velocity, 
+        'acceleration': acceleration
+    }
 
-    positions.append({
-        "symbol": symbol, 
-        "buy_price": float(buy_price)
-    })
+# Checks for sell signals for a symbol on input_date up to morning_sell_time.
+def check_sell(symbol, data, input_date):
+    # Check if symbol exists in positions
+    if symbol not in positions:
+        print("Error: trying to sell a stock without it being in positions.")
+        return
+
+    # Get all bars for the input_date
+    df = data[symbol]
+    input_date = pd.to_datetime(input_date).date()
+    day_bars = df.loc[pd.to_datetime(df.index).date == input_date]
+    if day_bars.empty:
+        return
+
+    # print("Day bars:", day_bars)
+
+    # Get buy price from positions
+    buy_price = positions[symbol]['buy_price']
+    take_profit_price = buy_price * (1 + profit_target_pct)
+    trailing_stop_loss_price = buy_price * (1 - trailing_stop_pct)
+
+    # Loop through hour bars for the day until morning_sell_time
+    for idx, row in day_bars.iterrows():
+        bar_time = pd.to_datetime(idx)
+        close = row['Close']
+        high = row['High']
+        low = row['Low']
+        
+        est = pytz.timezone('US/Eastern')
+        bar_time_est = bar_time.astimezone(est)
+        # print(bar_time_est.hour)
+        if bar_time_est.hour >= morning_sell_time:
+            sell(symbol, close, "MorningExit")
+            return
+        
+        # Update trailing stop loss if current high allows for a higher stop
+        trailing_stop_loss_price = max(trailing_stop_loss_price, high * (1 - trailing_stop_pct))
+        # if a stock hits the take profit and then the stop loss within one hour then it will assume the stop loss was triggered (slight bias against the strategy)
+        if high >= take_profit_price:
+            sell(symbol, take_profit_price, "TakeProfit")
+            return
+        if low <= trailing_stop_loss_price:
+            sell(symbol, trailing_stop_loss_price, "StopLoss")
+            return
+    
+    print(f"ERROR: For symbol {symbol}, on date {str(input_date)}, checked sell for the day but did not sell (this should not be happening).")
+
+# Sells a position for a symbol at a given price and time
+def sell(symbol, sell_price, sell_reason):
+    # print(f"SELL {symbol} at {sell_price} on {sell_time}")
+    buy_date = positions[symbol]['buy_date']
+    buy_price = positions[symbol]['buy_price']
+    velocity = positions[symbol]['velocity']
+    acceleration = positions[symbol]['acceleration']
+
+    with open("trade_logs.csv", "a", newline="") as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow([symbol, buy_date, buy_price, sell_price, velocity, acceleration, sell_reason])
+
+    del positions[symbol]
 
 def loop_through_days(data):
+    header = ["symbol", "date", "buy_price", "sell_price", "velocity", "acceleration", "sell_reason"]
+    # Create or clear the trade_logs.csv file and write the header
+    with open("trade_logs.csv", "w", newline="") as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow(header)
+
     # Loops through all days (rows) in the data and prints each date.
-    for current_date in data.index:
-        for position in positions:
-            symbol = position["symbol"]
-            # check_sell(symbol, data, current_date)
+    all_dates = sorted(set(pd.to_datetime(data.index).date))
+    for current_date in all_dates[top_gainers_lookback_days:]:
+        for symbol in list(positions.keys()):
+            check_sell(symbol, data, current_date)
             # Process each symbol in positions
         
         top_gainers = get_top_gainers(data, current_date)
         for symbol in top_gainers:
             check_buy(symbol, data, current_date)
-        
-        # for symbol in top_gainers:
-        #     check_buy(symbol, current_date)
 
         # Add counter and progress tracking
         if 'day_counter' not in locals():
             day_counter = 0
             total_days = len(set(data.index.date))
         day_counter += 1
-        if day_counter % 100 == 0:
+        if day_counter % 50 == 0:
             print(f"Looped through {day_counter} days / {total_days} days")
 
 if __name__ == "__main__":

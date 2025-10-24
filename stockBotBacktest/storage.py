@@ -1,5 +1,24 @@
+# storage for functions that aren't used in the backtest 
+# but that I want to keep access to in the future
+
 import yfinance as yf
 from config import top_gainers_lookback_days, number_of_top_gainers
+
+# it was correct for AAPL 2025-10-15
+def get_price(symbol, input_date):
+    # Get the price of the stock at 3:59pm on the given date.
+
+    # Download 1-minute interval data for the given date
+    start_date = date.fromisoformat(input_date)
+    end_date = start_date + timedelta(days=1)
+    data = yf.download(symbol, start=start_date, end=end_date, interval='1m', progress=False, auto_adjust=False)
+    if data.empty:
+        return None
+
+    # specific fields
+    close_2nd_last = data['Close'][symbol].iloc[-2]
+
+    return float(close_2nd_last) # get the price at the time of 3:58pm
 
 # get_top_gainers looking hours behind
 def get_top_gainers(data, input_date, symbols=None):

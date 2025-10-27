@@ -10,7 +10,7 @@ acceleration_sma = 5
 # Signal thresholds
 velocity_threshold_min = -0.5
 velocity_threshold_max = 0.0
-acceleration_threshold = 2.5
+acceleration_threshold = 0.2
 
 # Risk management
 profit_target_pct = 0.04  # 4% profit target

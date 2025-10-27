@@ -195,6 +195,17 @@ def check_sell(symbol, data, input_date):
     take_profit_price = buy_price * (1 + profit_target_pct)
     trailing_stop_loss_price = buy_price * (1 - trailing_stop_pct)
 
+    # This code is important, it checks if overnight the price went under stop loss or above take profit
+    # if the price moved at night the bot wouldn't sell at stop loss price but at open price
+    # Get the open price of the day (first bar)
+    open_price = day_bars.iloc[0]['Open']
+    if open_price <= trailing_stop_loss_price:
+        sell(symbol, open_price, "StopLoss")
+        return
+    if open_price >= take_profit_price:
+        sell(symbol, open_price, "TakeProfit")
+        return
+
     # Loop through hour bars for the day until morning_sell_time
     for idx, row in day_bars.iterrows():
         bar_time = pd.to_datetime(idx)
